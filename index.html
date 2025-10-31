@@ -91,7 +91,30 @@
     </div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <!-- Firebase SDK -->
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-database-compat.js"></script>
+
     <script>
+        // Firebase Configuration
+        // IMPORTANT: Replace these values with your own Firebase project credentials
+        // Get these from: Firebase Console > Project Settings > General > Your apps > SDK setup and configuration
+        const firebaseConfig = {
+            apiKey: "YOUR_API_KEY",
+            authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+            databaseURL: "https://YOUR_PROJECT_ID-default-rtdb.firebaseio.com",
+            projectId: "YOUR_PROJECT_ID",
+            storageBucket: "YOUR_PROJECT_ID.appspot.com",
+            messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
+            appId: "YOUR_APP_ID"
+        };
+
+        // Initialize Firebase
+        firebase.initializeApp(firebaseConfig);
+        const database = firebase.database();
+        const pointsRef = database.ref('bearingPoints');
+
         // Wait for page and Leaflet to load
         window.addEventListener('load', function() {
             initializeMap();
@@ -105,8 +128,9 @@
             }).addTo(map);
 
             // State
-            let points = []; // Array of {lat, lon, bearing, isReflection, marker, line}
+            let points = new Map(); // Map of Firebase ID -> {lat, lon, bearing, isReflection, marker, line, firebaseId}
             let contextMenu = null;
+            let isLoadingFromFirebase = false; // Flag to prevent echo during initial load
 
             // Style constants
             const NORMAL_COLOR = '#FF0000';
@@ -121,8 +145,57 @@
             // Line extension distance (in degrees, roughly 1000km)
             const LINE_EXTENSION = 10;
 
+            // Firebase listeners for real-time synchronization
+            setupFirebaseListeners();
+
             // Map click handler
             map.on('click', onMapClick);
+
+            function setupFirebaseListeners() {
+                // Listen for new points added
+                pointsRef.on('child_added', function(snapshot) {
+                    const firebaseId = snapshot.key;
+                    const data = snapshot.val();
+
+                    // Only add if not already in our local state (prevents duplicates)
+                    if (!points.has(firebaseId)) {
+                        addPoint(data.lat, data.lon, data.bearing, data.isReflection || false, firebaseId);
+                    }
+                });
+
+                // Listen for points being removed
+                pointsRef.on('child_removed', function(snapshot) {
+                    const firebaseId = snapshot.key;
+                    const pointData = points.get(firebaseId);
+
+                    if (pointData) {
+                        // Remove from map
+                        map.removeLayer(pointData.marker);
+                        map.removeLayer(pointData.line);
+
+                        // Remove from local state
+                        points.delete(firebaseId);
+
+                        // Update line styles
+                        updateLineStyles();
+                    }
+                });
+
+                // Listen for points being changed (e.g., reflection toggle)
+                pointsRef.on('child_changed', function(snapshot) {
+                    const firebaseId = snapshot.key;
+                    const data = snapshot.val();
+                    const pointData = points.get(firebaseId);
+
+                    if (pointData) {
+                        // Update the isReflection flag
+                        pointData.isReflection = data.isReflection || false;
+
+                        // Update line styles to reflect the change
+                        updateLineStyles();
+                    }
+                });
+            }
 
             function onMapClick(e) {
                 // Close any open context menu
@@ -206,10 +279,10 @@
                 document.getElementById('bearing-input').value = '';
             });
 
-            function addPoint(lat, lon, bearing) {
+            function addPoint(lat, lon, bearing, isReflection = false, firebaseId = null) {
                 // Calculate line endpoint - extend far in the bearing direction
                 const endpoint = calculateLineEndpoint(lat, lon, bearing);
-                
+
                 // Create marker
                 const marker = L.circleMarker([lat, lon], {
                     radius: 6,
@@ -219,37 +292,53 @@
                     opacity: 1,
                     fillOpacity: 1
                 }).addTo(map);
-                
+
                 // Create line
                 const line = L.polyline([[lat, lon], endpoint], {
                     color: RECENT_COLOR,
                     weight: RECENT_WEIGHT,
                     opacity: RECENT_OPACITY
                 }).addTo(map);
-                
+
                 // Add tooltip
                 marker.bindTooltip(`Lat: ${lat.toFixed(6)}<br>Lon: ${lon.toFixed(6)}<br>Bearing: ${bearing.toFixed(1)}°`, {
                     permanent: false,
                     direction: 'top'
                 });
-                
-                // Add point to array
+
+                // Create point data object
                 const pointData = {
                     lat: lat,
                     lon: lon,
                     bearing: bearing,
-                    isReflection: false,
+                    isReflection: isReflection,
                     marker: marker,
-                    line: line
+                    line: line,
+                    firebaseId: firebaseId
                 };
-                points.push(pointData);
-                
+
                 // Add context menu to marker
                 marker.on('contextmenu', function(e) {
                     showContextMenu(e.originalEvent.clientX, e.originalEvent.clientY, pointData);
                     L.DomEvent.stopPropagation(e);
                 });
-                
+
+                // If no firebaseId provided, this is a new point - save to Firebase
+                if (!firebaseId) {
+                    const newPointRef = pointsRef.push({
+                        lat: lat,
+                        lon: lon,
+                        bearing: bearing,
+                        isReflection: isReflection,
+                        timestamp: firebase.database.ServerValue.TIMESTAMP
+                    });
+                    pointData.firebaseId = newPointRef.key;
+                    points.set(newPointRef.key, pointData);
+                } else {
+                    // This point is being loaded from Firebase
+                    points.set(firebaseId, pointData);
+                }
+
                 // Update line styles
                 updateLineStyles();
             }
@@ -266,15 +355,18 @@
             }
 
             function updateLineStyles() {
+                // Convert Map to array for processing
+                const pointsArray = Array.from(points.values());
+
                 // Get non-reflection points
-                const nonReflectionPoints = points.filter(p => !p.isReflection);
-                
+                const nonReflectionPoints = pointsArray.filter(p => !p.isReflection);
+
                 // Identify the 3 most recent non-reflection points
                 const recentCount = Math.min(3, nonReflectionPoints.length);
                 const recentPoints = nonReflectionPoints.slice(-recentCount);
-                
+
                 // Update all lines
-                points.forEach(point => {
+                pointsArray.forEach(point => {
                     if (point.isReflection) {
                         point.line.setStyle({
                             color: REFLECTION_COLOR,
@@ -357,22 +449,22 @@
             }
 
             function deletePoint(pointData) {
-                // Remove from map
-                map.removeLayer(pointData.marker);
-                map.removeLayer(pointData.line);
-                
-                // Remove from array
-                const index = points.indexOf(pointData);
-                if (index > -1) {
-                    points.splice(index, 1);
+                // Remove from Firebase (this will trigger child_removed listener for all clients)
+                if (pointData.firebaseId) {
+                    pointsRef.child(pointData.firebaseId).remove();
                 }
-                
-                // Update line styles
-                updateLineStyles();
             }
 
             function toggleReflection(pointData) {
                 pointData.isReflection = !pointData.isReflection;
+
+                // Update Firebase (this will trigger child_changed listener for all clients)
+                if (pointData.firebaseId) {
+                    pointsRef.child(pointData.firebaseId).update({
+                        isReflection: pointData.isReflection
+                    });
+                }
+
                 updateLineStyles();
             }
 
