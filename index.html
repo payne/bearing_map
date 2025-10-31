@@ -85,6 +85,7 @@
             <input type="number" id="lat-input" placeholder="Latitude" step="any">
             <input type="number" id="lon-input" placeholder="Longitude" step="any">
             <input type="number" id="bearing-input" placeholder="Bearing (0-360°)" step="any" min="0" max="360">
+            <button id="use-location-btn">Use Current Location</button>
             <button id="add-point-btn">Add Point</button>
         </div>
     </div>
@@ -142,23 +143,63 @@
                 addPoint(e.latlng.lat, e.latlng.lng, bearingNum);
             }
 
+            document.getElementById('use-location-btn').addEventListener('click', function() {
+                if (!navigator.geolocation) {
+                    alert('Geolocation is not supported by your browser.');
+                    return;
+                }
+
+                const button = document.getElementById('use-location-btn');
+                button.disabled = true;
+                button.textContent = 'Getting location...';
+
+                navigator.geolocation.getCurrentPosition(
+                    function(position) {
+                        // Success
+                        const lat = position.coords.latitude;
+                        const lon = position.coords.longitude;
+
+                        document.getElementById('lat-input').value = lat;
+                        document.getElementById('lon-input').value = lon;
+
+                        button.disabled = false;
+                        button.textContent = 'Use Current Location';
+                    },
+                    function(error) {
+                        // Error
+                        let errorMsg = 'Unable to get your location.';
+                        if (error.code === error.PERMISSION_DENIED) {
+                            errorMsg = 'Permission denied. Please enable location access.';
+                        } else if (error.code === error.POSITION_UNAVAILABLE) {
+                            errorMsg = 'Location information is unavailable.';
+                        } else if (error.code === error.TIMEOUT) {
+                            errorMsg = 'Location request timed out.';
+                        }
+                        alert(errorMsg);
+
+                        button.disabled = false;
+                        button.textContent = 'Use Current Location';
+                    }
+                );
+            });
+
             document.getElementById('add-point-btn').addEventListener('click', function() {
                 const lat = parseFloat(document.getElementById('lat-input').value);
                 const lon = parseFloat(document.getElementById('lon-input').value);
                 const bearing = parseFloat(document.getElementById('bearing-input').value);
-                
+
                 if (isNaN(lat) || isNaN(lon) || isNaN(bearing)) {
                     alert('Please enter valid numbers for all fields.');
                     return;
                 }
-                
+
                 if (bearing < 0 || bearing > 360) {
                     alert('Bearing must be between 0 and 360.');
                     return;
                 }
-                
+
                 addPoint(lat, lon, bearing);
-                
+
                 // Clear inputs
                 document.getElementById('lat-input').value = '';
                 document.getElementById('lon-input').value = '';
