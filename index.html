@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bearing Line Map</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: Arial, sans-serif;
+        }
+        #map {
+            height: 100vh;
+            width: 100%;
+        }
+        #controls {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: white;
+            padding: 15px;
+            border-radius: 5px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+            z-index: 1000;
+            max-width: 300px;
+        }
+        #controls h3 {
+            margin-top: 0;
+            font-size: 16px;
+        }
+        #controls input, #controls button {
+            width: 100%;
+            margin: 5px 0;
+            padding: 8px;
+            box-sizing: border-box;
+        }
+        #controls button {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            cursor: pointer;
+            border-radius: 3px;
+        }
+        #controls button:hover {
+            background: #45a049;
+        }
+        #status {
+            margin-top: 10px;
+            padding: 8px;
+            background: #f0f0f0;
+            border-radius: 3px;
+            font-size: 12px;
+        }
+        .context-menu {
+            position: absolute;
+            background: white;
+            border: 1px solid #ccc;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+            z-index: 2000;
+            border-radius: 3px;
+            overflow: hidden;
+        }
+        .context-menu-item {
+            padding: 10px 20px;
+            cursor: pointer;
+            border-bottom: 1px solid #eee;
+        }
+        .context-menu-item:hover {
+            background: #f0f0f0;
+        }
+        .context-menu-item:last-child {
+            border-bottom: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    <div id="controls">
+        <h3>Bearing Line Map</h3>
+        <div id="status">Click on the map to add a point, or enter coordinates below</div>
+        <div id="manual-input">
+            <h4 style="font-size: 14px; margin-top: 15px;">Add Point Manually:</h4>
+            <input type="number" id="lat-input" placeholder="Latitude" step="any">
+            <input type="number" id="lon-input" placeholder="Longitude" step="any">
+            <input type="number" id="bearing-input" placeholder="Bearing (0-360°)" step="any" min="0" max="360">
+            <button id="add-point-btn">Add Point</button>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        // Wait for page and Leaflet to load
+        window.addEventListener('load', function() {
+            initializeMap();
+        });
+
+        function initializeMap() {
+            // Initialize map
+            const map = L.map('map').setView([40, -100], 4);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '© OpenStreetMap contributors'
+            }).addTo(map);
+
+            // State
+            let points = []; // Array of {lat, lon, bearing, isReflection, marker, line}
+            let contextMenu = null;
+
+            // Style constants
+            const NORMAL_COLOR = '#FF0000';
+            const NORMAL_WEIGHT = 3;
+            const RECENT_COLOR = '#FF0000';
+            const RECENT_WEIGHT = 5;
+            const RECENT_OPACITY = 1;
+            const REFLECTION_COLOR = '#808080';
+            const REFLECTION_WEIGHT = 2;
+            const REFLECTION_OPACITY = 0.5;
+
+            // Line extension distance (in degrees, roughly 1000km)
+            const LINE_EXTENSION = 10;
+
+            // Map click handler
+            map.on('click', onMapClick);
+
+            function onMapClick(e) {
+                // Close any open context menu
+                if (contextMenu) {
+                    contextMenu.remove();
+                    contextMenu = null;
+                }
+                
+                const bearing = prompt('Enter bearing (0-360°):');
+                if (bearing === null) return;
+                
+                const bearingNum = parseFloat(bearing);
+                if (isNaN(bearingNum) || bearingNum < 0 || bearingNum > 360) {
+                    alert('Invalid bearing. Please enter a number between 0 and 360.');
+                    return;
+                }
+                
+                addPoint(e.latlng.lat, e.latlng.lng, bearingNum);
+            }
+
+            document.getElementById('add-point-btn').addEventListener('click', function() {
+                const lat = parseFloat(document.getElementById('lat-input').value);
+                const lon = parseFloat(document.getElementById('lon-input').value);
+                const bearing = parseFloat(document.getElementById('bearing-input').value);
+                
+                if (isNaN(lat) || isNaN(lon) || isNaN(bearing)) {
+                    alert('Please enter valid numbers for all fields.');
+                    return;
+                }
+                
+                if (bearing < 0 || bearing > 360) {
+                    alert('Bearing must be between 0 and 360.');
+                    return;
+                }
+                
+                addPoint(lat, lon, bearing);
+                
+                // Clear inputs
+                document.getElementById('lat-input').value = '';
+                document.getElementById('lon-input').value = '';
+                document.getElementById('bearing-input').value = '';
+            });
+
+            function addPoint(lat, lon, bearing) {
+                // Calculate line endpoint - extend far in the bearing direction
+                const endpoint = calculateLineEndpoint(lat, lon, bearing);
+                
+                // Create marker
+                const marker = L.circleMarker([lat, lon], {
+                    radius: 6,
+                    fillColor: '#FF0000',
+                    color: '#FFFFFF',
+                    weight: 2,
+                    opacity: 1,
+                    fillOpacity: 1
+                }).addTo(map);
+                
+                // Create line
+                const line = L.polyline([[lat, lon], endpoint], {
+                    color: RECENT_COLOR,
+                    weight: RECENT_WEIGHT,
+                    opacity: RECENT_OPACITY
+                }).addTo(map);
+                
+                // Add tooltip
+                marker.bindTooltip(`Lat: ${lat.toFixed(6)}<br>Lon: ${lon.toFixed(6)}<br>Bearing: ${bearing.toFixed(1)}°`, {
+                    permanent: false,
+                    direction: 'top'
+                });
+                
+                // Add point to array
+                const pointData = {
+                    lat: lat,
+                    lon: lon,
+                    bearing: bearing,
+                    isReflection: false,
+                    marker: marker,
+                    line: line
+                };
+                points.push(pointData);
+                
+                // Add context menu to marker
+                marker.on('contextmenu', function(e) {
+                    showContextMenu(e.originalEvent.clientX, e.originalEvent.clientY, pointData);
+                    L.DomEvent.stopPropagation(e);
+                });
+                
+                // Update line styles
+                updateLineStyles();
+            }
+
+            function calculateLineEndpoint(lat, lon, bearing) {
+                // Convert bearing to radians (0° = North, clockwise)
+                const bearingRad = (90 - bearing) * Math.PI / 180;
+                
+                // Calculate endpoint by extending LINE_EXTENSION degrees in the bearing direction
+                const endLat = lat + LINE_EXTENSION * Math.sin(bearingRad);
+                const endLon = lon + LINE_EXTENSION * Math.cos(bearingRad);
+                
+                return [endLat, endLon];
+            }
+
+            function updateLineStyles() {
+                // Get non-reflection points
+                const nonReflectionPoints = points.filter(p => !p.isReflection);
+                
+                // Identify the 3 most recent non-reflection points
+                const recentCount = Math.min(3, nonReflectionPoints.length);
+                const recentPoints = nonReflectionPoints.slice(-recentCount);
+                
+                // Update all lines
+                points.forEach(point => {
+                    if (point.isReflection) {
+                        point.line.setStyle({
+                            color: REFLECTION_COLOR,
+                            weight: REFLECTION_WEIGHT,
+                            opacity: REFLECTION_OPACITY
+                        });
+                        point.marker.setStyle({
+                            fillColor: REFLECTION_COLOR
+                        });
+                    } else if (recentPoints.includes(point)) {
+                        point.line.setStyle({
+                            color: RECENT_COLOR,
+                            weight: RECENT_WEIGHT,
+                            opacity: RECENT_OPACITY
+                        });
+                        point.marker.setStyle({
+                            fillColor: RECENT_COLOR
+                        });
+                    } else {
+                        point.line.setStyle({
+                            color: NORMAL_COLOR,
+                            weight: NORMAL_WEIGHT,
+                            opacity: 1
+                        });
+                        point.marker.setStyle({
+                            fillColor: NORMAL_COLOR
+                        });
+                    }
+                });
+            }
+
+            function showContextMenu(x, y, pointData) {
+                // Remove existing context menu
+                if (contextMenu) {
+                    contextMenu.remove();
+                }
+                
+                contextMenu = document.createElement('div');
+                contextMenu.className = 'context-menu';
+                contextMenu.style.left = x + 'px';
+                contextMenu.style.top = y + 'px';
+                
+                // Delete option
+                const deleteItem = document.createElement('div');
+                deleteItem.className = 'context-menu-item';
+                deleteItem.textContent = 'Delete Point';
+                deleteItem.addEventListener('click', function() {
+                    deletePoint(pointData);
+                    contextMenu.remove();
+                    contextMenu = null;
+                });
+                contextMenu.appendChild(deleteItem);
+                
+                // Toggle reflection option
+                const reflectionItem = document.createElement('div');
+                reflectionItem.className = 'context-menu-item';
+                reflectionItem.textContent = pointData.isReflection ? 'Unmark as Reflection' : 'Mark as Reflection';
+                reflectionItem.addEventListener('click', function() {
+                    toggleReflection(pointData);
+                    contextMenu.remove();
+                    contextMenu = null;
+                });
+                contextMenu.appendChild(reflectionItem);
+                
+                document.body.appendChild(contextMenu);
+                
+                // Close menu on any click outside
+                setTimeout(() => {
+                    document.addEventListener('click', closeContextMenu);
+                    map.once('click', closeContextMenu);
+                }, 0);
+            }
+
+            function closeContextMenu() {
+                if (contextMenu) {
+                    contextMenu.remove();
+                    contextMenu = null;
+                }
+                document.removeEventListener('click', closeContextMenu);
+            }
+
+            function deletePoint(pointData) {
+                // Remove from map
+                map.removeLayer(pointData.marker);
+                map.removeLayer(pointData.line);
+                
+                // Remove from array
+                const index = points.indexOf(pointData);
+                if (index > -1) {
+                    points.splice(index, 1);
+                }
+                
+                // Update line styles
+                updateLineStyles();
+            }
+
+            function toggleReflection(pointData) {
+                pointData.isReflection = !pointData.isReflection;
+                updateLineStyles();
+            }
+
+            // Prevent default context menu on map
+            map.getContainer().addEventListener('contextmenu', function(e) {
+                e.preventDefault();
+            });
+        } // end initializeMap
+    </script>
+</body>
+</html>
